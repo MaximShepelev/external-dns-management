@@ -5,6 +5,8 @@
 package cloudflare
 
 import (
+	"context"
+
 	"github.com/cloudflare/cloudflare-go"
 	"k8s.io/client-go/util/flowcontrol"
 
@@ -23,6 +25,7 @@ type access struct {
 	*cloudflare.API
 	metrics     provider.Metrics
 	rateLimiter flowcontrol.RateLimiter
+	ctx         context.Context
 }
 
 func NewAccess(apiToken string, metrics provider.Metrics, rateLimiter flowcontrol.RateLimiter) (Access, error) {
@@ -30,13 +33,13 @@ func NewAccess(apiToken string, metrics provider.Metrics, rateLimiter flowcontro
 	if err != nil {
 		return nil, err
 	}
-	return &access{API: api, metrics: metrics, rateLimiter: rateLimiter}, nil
+	return &access{API: api, metrics: metrics, rateLimiter: rateLimiter, ctx: context.Background()}, nil
 }
 
 func (this *access) ListZones(consume func(zone cloudflare.Zone) (bool, error)) error {
 	this.metrics.AddGenericRequests(provider.M_LISTZONES, 1)
 	this.rateLimiter.Accept()
-	results, err := this.API.ListZones()
+	results, err := this.API.ListZones(this.ctx)
 	if err != nil {
 		return err
 	}
@@ -57,7 +60,15 @@ func (this *access) listRecords(zoneId string, consume func(record cloudflare.DN
 ) error {
 	this.metrics.AddZoneRequests(zoneId, provider.M_LISTRECORDS, 1)
 	this.rateLimiter.Accept()
-	results, err := this.DNSRecords(zoneId, record)
+	rc := cloudflare.ZoneIdentifier(zoneId)
+	params := cloudflare.ListDNSRecordsParams{}
+	if record.Type != "" {
+		params.Type = record.Type
+	}
+	if record.Name != "" {
+		params.Name = record.Name
+	}
+	results, _, err := this.API.ListDNSRecords(this.ctx, rc, params)
 	if err != nil {
 		return err
 	}
@@ -70,44 +81,43 @@ func (this *access) listRecords(zoneId string, consume func(record cloudflare.DN
 }
 
 func (this *access) CreateRecord(r raw.Record, zone provider.DNSHostedZone) error {
-	a := r.(*Record)
 	ttl := r.GetTTL()
 	testTTL(&ttl)
-	dnsRecord := cloudflare.DNSRecord{
+	rc := cloudflare.ZoneIdentifier(zone.Id().ID)
+	params := cloudflare.CreateDNSRecordParams{
 		Type:    r.GetType(),
 		Name:    r.GetDNSName(),
 		Content: r.GetValue(),
 		TTL:     int(ttl),
-		ZoneID:  a.ZoneID,
 	}
 	this.metrics.AddZoneRequests(zone.Id().ID, provider.M_CREATERECORDS, 1)
 	this.rateLimiter.Accept()
-	_, err := this.CreateDNSRecord(a.ZoneID, dnsRecord)
+	_, err := this.API.CreateDNSRecord(this.ctx, rc, params)
 	return err
 }
 
 func (this *access) UpdateRecord(r raw.Record, zone provider.DNSHostedZone) error {
-	a := r.(*Record)
 	ttl := r.GetTTL()
 	testTTL(&ttl)
-	dnsRecord := cloudflare.DNSRecord{
+	rc := cloudflare.ZoneIdentifier(zone.Id().ID)
+	params := cloudflare.UpdateDNSRecordParams{
 		Type:    r.GetType(),
 		Name:    r.GetDNSName(),
 		Content: r.GetValue(),
 		TTL:     int(ttl),
-		ZoneID:  a.ZoneID,
+		ID:      r.GetId(),
 	}
 	this.metrics.AddZoneRequests(zone.Id().ID, provider.M_UPDATERECORDS, 1)
 	this.rateLimiter.Accept()
-	err := this.UpdateDNSRecord(a.ZoneID, r.GetId(), dnsRecord)
+	_, err := this.API.UpdateDNSRecord(this.ctx, rc, params)
 	return err
 }
 
 func (this *access) DeleteRecord(r raw.Record, zone provider.DNSHostedZone) error {
-	a := r.(*Record)
 	this.metrics.AddZoneRequests(zone.Id().ID, provider.M_DELETERECORDS, 1)
 	this.rateLimiter.Accept()
-	err := this.DeleteDNSRecord(a.ZoneID, r.GetId())
+	rc := cloudflare.ZoneIdentifier(zone.Id().ID)
+	err := this.API.DeleteDNSRecord(this.ctx, rc, r.GetId())
 	return err
 }
 
@@ -117,7 +127,6 @@ func (this *access) NewRecord(fqdn, rtype, value string, zone provider.DNSHosted
 		Name:    fqdn,
 		Content: value,
 		TTL:     int(ttl),
-		ZoneID:  zone.Id().ID,
 	})
 }
 
